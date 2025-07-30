@@ -220,6 +220,201 @@ const deleteUserProfile = asyncHandler(async (req, res) => {
   res.status(200).json({ status: true, message: "User deleted successfully" });
 });
 
+const getTeamList = asyncHandler(async (req, res) => {
+  const { search } = req.query;
+  const { userId } = req.user;
+  let query = {};
+
+  // Lấy thông tin user hiện tại
+  const currentUser = await User.findById(userId);
+
+  if (currentUser.isAdmin) {
+    // Admin lấy toàn bộ user
+    if (search) {
+      const searchQuery = {
+        $or: [
+          { title: { $regex: search, $options: "i" } },
+          { name: { $regex: search, $options: "i" } },
+          { role: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ],
+      };
+      query = { ...query, ...searchQuery };
+    }
+    const user = await User.find(query).select("name title role email isActive");
+    return res.status(201).json(user);
+  } else if (currentUser.isProjectManager) {
+    // PM chỉ lấy user trong team của mình
+    let userQuery = { _id: { $in: currentUser.team } };
+    if (search) {
+      const searchQuery = {
+        $or: [
+          { title: { $regex: search, $options: "i" } },
+          { name: { $regex: search, $options: "i" } },
+          { role: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ],
+      };
+      userQuery = { ...userQuery, ...searchQuery };
+    }
+    const users = await User.find(userQuery).select("name title role email isActive");
+    return res.status(201).json(users);
+  } else {
+    // Member chỉ lấy chính mình
+    const user = await User.findById(userId).select("name title role email isActive");
+    return res.status(201).json([user]);
+  }
+});
+
+// Lấy danh sách team của project manager hiện tại
+const getPMTeamList = asyncHandler(async (req, res) => {
+  const { userId } = req.user;
+  const currentUser = await User.findById(userId);
+
+  if (!currentUser.isProjectManager) {
+    return res.status(403).json({ message: "Only project managers can access this resource." });
+  }
+
+  // Lấy các user trong team của PM
+  const users = await User.find({ _id: { $in: currentUser.team } })
+    .select("name title role email isActive");
+
+  res.status(200).json(users);
+});
+
+const addUserByAdmin = asyncHandler(async (req, res) => {
+  const { name, email, password, role, title, company } = req.body;
+
+  const userExists = await User.findOne({ email });
+  if (userExists) {
+    return res
+      .status(400)
+      .json({ status: false, message: "Email address already exists" });
+  }
+
+  // Determine user role and permissions
+  let userRole = "member";
+  let isProjectManager = false;
+  let isAdmin = false;
+
+  if (role === "project_manager") {
+    userRole = "project_manager";
+    isProjectManager = true;
+  } else if (role === "admin") {
+    userRole = "admin";
+    isAdmin = true;
+  }
+
+  // Create user with appropriate settings
+  const user = await User.create({
+    name,
+    email,
+    password,
+    role: userRole,
+    title: title || "",
+    company: company || "",
+    isAdmin,
+    isProjectManager,
+    isActive: true,
+  });
+
+  if (user) {
+    user.password = undefined;
+    res.status(201).json({
+      status: true,
+      message: "User added successfully!",
+      user
+    });
+  } else {
+    return res
+      .status(400)
+      .json({ status: false, message: "Invalid user data" });
+  }
+});
+
+// Thêm user vào team của PM bằng email
+const addUserToTeam = asyncHandler(async (req, res) => {
+  const { userId } = req.user; // PM đang đăng nhập
+  const { email } = req.body;
+
+  const pm = await User.findById(userId);
+  if (!pm || !pm.isProjectManager) {
+    return res.status(403).json({ status: false, message: "Only project managers can add team members." });
+  }
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    return res.status(404).json({ status: false, message: "User not found." });
+  }
+
+  if (pm.team.map(id => id.toString()).includes(user._id.toString())) {
+    return res.status(400).json({ status: false, message: "User already in team." });
+  }
+
+  pm.team.push(user._id);
+  await pm.save();
+
+  // Emit event team-updated cho user được thêm
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user-${user._id}`).emit("team-updated", { userId: user._id });
+  }
+
+  res.status(200).json({ status: true, message: "User added to team successfully.", user });
+});
+
+// Xóa user khỏi team của PM
+const removeUserFromTeam = asyncHandler(async (req, res) => {
+  const { userId } = req.user; // PM đang đăng nhập
+  const { userIdToRemove } = req.body;
+
+  const pm = await User.findById(userId);
+  if (!pm || !pm.isProjectManager) {
+    return res.status(403).json({ status: false, message: "Only project managers can remove team members." });
+  }
+
+  const idx = pm.team.map(id => id.toString()).indexOf(userIdToRemove);
+  if (idx === -1) {
+    return res.status(404).json({ status: false, message: "User not in team." });
+  }
+
+  pm.team.splice(idx, 1);
+  await pm.save();
+
+  // Emit event team-updated cho user bị xóa
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user-${userIdToRemove}`).emit("team-updated", { userId: userIdToRemove });
+  }
+
+  res.status(200).json({ status: true, message: "User removed from team successfully." });
+});
+
+// Tìm kiếm user toàn hệ thống theo tên hoặc email (gần đúng)
+const searchUsers = asyncHandler(async (req, res) => {
+  const { q } = req.query;
+  if (!q || q.trim() === "") {
+    return res.status(400).json({ status: false, message: "Missing search query" });
+  }
+  // Chỉ cho phép PM hoặc Admin
+  if (!(req.user && (req.user.isAdmin || req.user.isProjectManager))) {
+    return res.status(403).json({ status: false, message: "Not authorized" });
+  }
+  // Chỉ trả về project_manager hoặc member
+  const users = await User.find({
+    $and: [
+      { role: { $in: ["project_manager", "member"] } },
+      {
+        $or: [
+          { name: { $regex: q, $options: "i" } },
+          { email: { $regex: q, $options: "i" } }
+        ]
+      }
+    ]
+  }).select("name email role");
+  res.status(200).json(users);
+});
+
 export {
   createAdminUser,
   deleteUserProfile,
@@ -227,4 +422,10 @@ export {
   logoutUser,
   registerUser,
   updateUserProfile,
+  getTeamList,
+  addUserByAdmin,
+  addUserToTeam,
+  removeUserFromTeam,
+  getPMTeamList,
+  searchUsers,
 };
