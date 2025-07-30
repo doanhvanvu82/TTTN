@@ -6,6 +6,7 @@ import morgan from "morgan";
 import { createServer } from "http";
 import { errorHandler, routeNotFound } from "./middleware/errorMiddleware.js";
 import dbConnection from "./utils/connectDB.js";
+import routes from "./routes/index.js";
 
 dotenv.config();
 

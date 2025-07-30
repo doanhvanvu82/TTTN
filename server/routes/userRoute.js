@@ -17,6 +17,13 @@ router.post("/login", loginUser);
 router.post("/logout", logoutUser);
 
 router.put("/profile", protectRoute, updateUserProfile);
+router.get("/get-team", protectRoute, isAdminRoute, getTeamList);
+router.post("/add-user", protectRoute, isAdminRoute, addUserByAdmin);
+router.post("/team/add", protectRoute, addUserToTeam);
+router.post("/team/remove", protectRoute, removeUserFromTeam);
+
+// Route cho project manager lấy team của mình
+router.get("/pm-team", protectRoute, getPMTeamList);
 //   FOR ADMIN ONLY - ADMIN ROUTES
 router
   .route("/:id")
