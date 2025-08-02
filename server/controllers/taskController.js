@@ -466,10 +466,107 @@ const trashTask = asyncHandler(async (req, res) => {
   }
 });
 
+const getPerformanceReport = asyncHandler(async (req, res) => {
+  try {
+    const { userId, isAdmin, isProjectManager } = req.user;
+    const { startDate, endDate, memberId } = req.query;
+
+    let query = { isTrashed: false };
+
+    if (!isAdmin) {
+      query.team = { $all: [userId] };
+    } else if (memberId) {
+      query.team = { $all: [memberId] };
+    }
+
+    if (startDate && endDate) {
+      query.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+
+    const tasks = await Task.find(query)
+      .populate({
+        path: "team",
+        select: "name title email",
+      })
+      .sort({ createdAt: -1 });
+
+    // Tính toán các chỉ số
+    const totalTasks = tasks.length;
+    const completedTasks = tasks.filter(task => task.stage === "completed").length;
+    const overdueTasks = tasks.filter(task => 
+      task.dueDate && task.dueDate < new Date() && task.stage !== "completed"
+    ).length;
+    
+    const avgCompletionTime = tasks
+      .filter(task => task.completedAt && task.createdAt)
+      .reduce((acc, task) => {
+        const completionTime = task.completedAt - task.createdAt;
+        return acc + completionTime;
+      }, 0) / Math.max(completedTasks, 1);
+
+    // Phân tích theo priority
+    const priorityStats = tasks.reduce((acc, task) => {
+      acc[task.priority] = (acc[task.priority] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Phân tích theo stage
+    const stageStats = tasks.reduce((acc, task) => {
+      acc[task.stage] = (acc[task.stage] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Phân tích theo member (admin: all users, pm: only team)
+    let memberStats = [];
+    if (isAdmin || isProjectManager) {
+      let allUsers = [];
+      if (isAdmin) {
+        allUsers = await User.find({ isActive: true }).select("name email");
+      } else if (isProjectManager) {
+        const currentUser = await User.findById(userId);
+        allUsers = await User.find({ _id: { $in: currentUser.team }, isActive: true }).select("name email");
+      }
+      memberStats = allUsers.map(user => {
+        const userTasks = tasks.filter(task => 
+          task.team.some(member => member._id.toString() === user._id.toString())
+        );
+        return {
+          user: { name: user.name, email: user.email },
+          totalTasks: userTasks.length,
+          completedTasks: userTasks.filter(task => task.stage === "completed").length,
+          overdueTasks: userTasks.filter(task => 
+            task.dueDate && task.dueDate < new Date() && task.stage !== "completed"
+          ).length,
+        };
+      });
+    }
+
+    res.status(200).json({
+      status: true,
+      report: {
+        totalTasks,
+        completedTasks,
+        overdueTasks,
+        completionRate: totalTasks > 0 ? (completedTasks / totalTasks * 100).toFixed(2) : 0,
+        avgCompletionTime: Math.round(avgCompletionTime / (1000 * 60 * 60 * 24)), // Convert to days
+        priorityStats,
+        stageStats,
+        memberStats,
+      },
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
 export {
   createTask,
   getTask,
   getTasks,
   updateTask,
   trashTask,
+  getPerformanceReport
 };

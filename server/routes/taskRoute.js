@@ -16,6 +16,7 @@ router.get("/", protectRoute, getTasks);
 router.get("/:id", protectRoute, getTask);
 router.put("/update/:id", protectRoute, isProjectManagerRoute, updateTask);
 router.put("/:id", protectRoute, isProjectManagerRoute, trashTask);
+router.get("/performance", protectRoute, getPerformanceReport);
 
 
 export default router;
