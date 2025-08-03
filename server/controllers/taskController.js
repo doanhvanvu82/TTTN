@@ -1,7 +1,12 @@
 import asyncHandler from "express-async-handler";
+import Notice from "../models/notisModel.js";
 import Task from "../models/taskModel.js";
 import User from "../models/userModel.js";
+import Notification from "../models/notisModel.js";
 import Activity from "../models/activityModel.js";
+import Comment from "../models/commentModel.js";
+import Reminder from "../models/reminderModel.js";
+import SubTask from "../models/subTaskModel.js";
 
 const createTask = asyncHandler(async (req, res) => {
   try {
@@ -171,6 +176,169 @@ const createTask = asyncHandler(async (req, res) => {
   }
 });
 
+const duplicateTask = asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.user;
+
+    const task = await Task.findById(id);
+    
+    if (!task) {
+      return res.status(404).json({ status: false, message: "Task not found" });
+    }
+
+    console.log(`=== DUPLICATE TASK ===`);
+    console.log(`Original task:`, {
+      id: task._id,
+      title: task.title,
+      projectManager: task.projectManager,
+      team: task.team
+    });
+
+    //alert users of the task
+    let text = "New task has been assigned to you";
+    if (task.team?.length > 1) {
+      text = text + ` and ${task.team?.length - 1} others.`;
+    }
+
+    text =
+      text +
+      ` The task priority is set a ${
+        task.priority
+      } priority, so check and act accordingly. The task date is ${new Date(
+        task.date
+      ).toDateString()}. Thank you!!!`;
+
+    const activity = {
+      type: "assigned",
+      activity: text,
+      by: userId,
+    };
+
+    // Đảm bảo PM luôn có trong team khi duplicate task
+    let teamWithPM = Array.isArray(task.team) ? [...task.team] : [];
+    const pmInTeam = teamWithPM.some(memberId => 
+      memberId.toString() === task.projectManager.toString()
+    );
+    
+    if (!pmInTeam) {
+      teamWithPM.push(task.projectManager);
+      console.log(`✅ Added PM to team during task duplication. Team:`, teamWithPM);
+    } else {
+      console.log(`✅ PM already in team during duplication. No duplicate added.`);
+    }
+
+    const taskData = {
+      title: "Duplicate - " + task.title,
+      projectManager: task.projectManager, // Đảm bảo projectManager được set
+      team: teamWithPM,
+      stage: task.stage,
+      date: task.date,
+      priority: task.priority,
+      assets: task.assets || [],
+      links: task.links || [],
+      description: task.description || "",
+      startDate: task.startDate,
+      dueDate: task.dueDate,
+      reminders: task.reminders || [],
+      dependencies: task.dependencies || [],
+      estimatedHours: task.estimatedHours,
+      activities: [], // Để rỗng, không truyền object
+      subTasks: [], // Để rỗng, sẽ tạo subtask mới sau
+    };
+
+    console.log(`New task data:`, taskData);
+
+    const newTask = await Task.create(taskData);
+
+    console.log(`✅ Task duplicated successfully:`, {
+      id: newTask._id,
+      title: newTask.title,
+      projectManager: newTask.projectManager,
+      team: newTask.team
+    });
+
+    // Tạo activity cho task duplicated
+    const newActivity = await Activity.create({
+      type: "assigned",
+      activity: text,
+      by: userId,
+      task: newTask._id,
+    });
+
+    // Thêm activityId vào mảng activities của Task
+    newTask.activities.push(newActivity._id);
+
+    // Duplicate subtasks nếu có
+    if (task.subTasks && task.subTasks.length > 0) {
+      // Populate subtasks để lấy thông tin đầy đủ
+      const originalSubTasks = await SubTask.find({ _id: { $in: task.subTasks } });
+      
+      for (const originalSubTask of originalSubTasks) {
+        const newSubTask = await SubTask.create({
+          title: originalSubTask.title,
+          date: originalSubTask.date,
+          dueDate: originalSubTask.dueDate,
+          tag: originalSubTask.tag,
+          isCompleted: false, // Reset trạng thái về false
+          dependencies: originalSubTask.dependencies || [],
+          task: newTask._id,
+        });
+        
+        // Thêm subTaskId vào mảng subTasks của Task
+        newTask.subTasks.push(newSubTask._id);
+      }
+    }
+
+    await newTask.save();
+
+    // Tạo notifications cho team members của task duplicated
+    if (newTask.team && newTask.team.length > 0) {
+      for (const memberId of newTask.team) {
+        if (memberId && memberId.toString() !== userId.toString()) {
+          // Tạo notification cho từng thành viên (trừ PM)
+          await Notification.create({
+            recipient: memberId,
+            sender: userId,
+            type: "task_assigned",
+            title: "Task Duplicated",
+            message: `Task "${newTask.title}" has been duplicated and assigned to you.`,
+            task: newTask._id.toString(),
+            metadata: {
+              dueDate: newTask.dueDate,
+              priority: newTask.priority,
+              stage: newTask.stage,
+            },
+          });
+          
+          // Emit socket event kèm unreadCount
+          const io = req.app.get("io");
+          if (io) {
+            const count = await Notification.countDocuments({ recipient: memberId, isRead: false });
+            io.to(`user-${memberId}`).emit("notification-new", { userId: memberId, unreadCount: count });
+          }
+        }
+      }
+    }
+
+    // Emit realtime events for task duplication
+    const io = req.app.get("io");
+    if (io) {
+      // Emit task-specific event
+      io.to(`task-${newTask._id}`).emit("task-added", { taskId: newTask._id });
+      // Emit global event để BoardView có thể nhận được
+      io.emit("task-added-global", { taskId: newTask._id });
+      console.log(`Emitted task-added events for duplicated task ${newTask._id}`);
+    }
+
+    res
+      .status(200)
+      .json({ status: true, message: "Task duplicated successfully." });
+  } catch (error) {
+    return res.status(500).json({ status: false, message: error.message });
+  }
+});
+
 const updateTask = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { userId } = req.user;
@@ -280,6 +448,109 @@ const updateTask = asyncHandler(async (req, res) => {
     res
       .status(200)
       .json({ status: true, message: "Task updated successfully." });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+const updateTaskStage = asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.user;
+    const { stage } = req.body;
+
+    const task = await Task.findById(id).populate('dependencies', 'stage title');
+    
+    if (!task) {
+      return res.status(404).json({ status: false, message: "Task not found" });
+    }
+
+    // Get user details to check permissions
+    const user = await User.findById(userId);
+    
+    // Check if user can update task stage
+    const canUpdateStage = user.isAdmin || 
+                          task.projectManager.toString() === userId ||
+                          task.team.some(member => member.toString() === userId);
+    
+    if (!canUpdateStage) {
+      return res.status(403).json({ 
+        status: false, 
+        message: "You don't have permission to update this task" 
+      });
+    }
+
+    const oldStage = task.stage;
+    const newStage = stage.toLowerCase();
+
+    // Kiểm tra workflow nghiêm ngặt
+    const validTransitions = {
+      'todo': ['in progress'],
+      'in progress': ['completed'],
+      'completed': [] // Không thể chuyển từ completed sang stage khác
+    };
+
+    if (!validTransitions[oldStage]?.includes(newStage)) {
+      return res.status(400).json({
+        status: false,
+        message: `Invalid stage transition. Can only move from '${oldStage}' to: ${validTransitions[oldStage]?.join(', ') || 'none'}`
+      });
+    }
+
+    // Kiểm tra dependencies nếu chuyển sang 'in progress' hoặc 'completed'
+    if (newStage === 'in progress' || newStage === 'completed') {
+      if (task.dependencies && task.dependencies.length > 0) {
+        const incompleteDependencies = task.dependencies.filter(dep => dep.stage !== 'completed');
+        
+        if (incompleteDependencies.length > 0) {
+          const dependencyNames = incompleteDependencies.map(dep => dep.title).join(', ');
+          return res.status(400).json({
+            status: false,
+            message: `Cannot change stage. The following dependencies must be completed first: ${dependencyNames}`
+          });
+        }
+      }
+    }
+
+    task.stage = newStage;
+
+    // Nếu task được hoàn thành, cập nhật completedAt
+    if (newStage === "completed" && oldStage !== "completed") {
+      // Set completedAt with +7h timezone adjustment
+      task.completedAt = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    }
+
+    await task.save();
+
+    // Emit realtime event
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task-${id}`).emit("task-stage-changed", { taskId: id, stage: task.stage });
+      io.emit("task-stage-changed-global", { taskId: id, stage: task.stage }); // Thêm dòng này
+    }
+
+    // Kiểm tra dependencies và thông báo cho các task phụ thuộc
+    if (newStage === "completed") {
+      const dependentTasks = await Task.find({ dependencies: id });
+      
+      for (const dependentTask of dependentTasks) {
+        // Tạo notification cho team members của task phụ thuộc
+        for (const memberId of dependentTask.team) {
+          await Notification.create({
+            recipient: memberId,
+            sender: req.user.userId,
+            type: "dependency_completed",
+            title: "Dependency Completed",
+            message: `Task "${task.title}" has been completed. You can now start working on "${dependentTask.title}".`,
+            task: dependentTask._id.toString(),
+          });
+        }
+      }
+    }
+
+    res
+      .status(200)
+      .json({ status: true, message: "Task stage changed successfully." });
   } catch (error) {
     return res.status(400).json({ status: false, message: error.message });
   }
@@ -466,6 +737,209 @@ const trashTask = asyncHandler(async (req, res) => {
   }
 });
 
+const deleteRestoreTask = asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { actionType } = req.query;
+    const io = req.app.get("io");
+    let affectedTaskId = id;
+
+    if (actionType === "delete") {
+      // Cascade delete: Xóa toàn bộ entity liên quan trước khi xóa task
+      
+      // Xóa comments
+      await Comment.deleteMany({ task: id });
+      console.log(`✅ Deleted comments for task: ${id}`);
+
+      // Xóa activities
+      await Activity.deleteMany({ task: id });
+      console.log(`✅ Deleted activities for task: ${id}`);
+
+      // Xóa reminders
+      await Reminder.deleteMany({ task: id });
+      console.log(`✅ Deleted reminders for task: ${id}`);
+
+      // Xóa subtasks
+      await SubTask.deleteMany({ task: id });
+      console.log(`✅ Deleted subtasks for task: ${id}`);
+
+      // Cuối cùng xóa task
+      await Task.findByIdAndDelete(id);
+      console.log(`✅ Deleted task: ${id}`);
+
+      if (io) io.to(`task-${id}`).emit("task-deleted", { taskId: id });
+    } else if (actionType === "deleteAll") {
+      // Cascade delete cho tất cả task trong trash
+      
+      // Lấy danh sách task IDs sẽ bị xóa
+      const tasksToDelete = await Task.find({ isTrashed: true }).select('_id');
+      const taskIds = tasksToDelete.map(task => task._id);
+
+      if (taskIds.length > 0) {
+        // Xóa comments
+        await Comment.deleteMany({ task: { $in: taskIds } });
+        console.log(`✅ Deleted comments for ${taskIds.length} tasks`);
+
+        // Xóa activities
+        await Activity.deleteMany({ task: { $in: taskIds } });
+        console.log(`✅ Deleted activities for ${taskIds.length} tasks`);
+
+        // Xóa reminders
+        await Reminder.deleteMany({ task: { $in: taskIds } });
+        console.log(`✅ Deleted reminders for ${taskIds.length} tasks`);
+
+        // Xóa subtasks
+        await SubTask.deleteMany({ task: { $in: taskIds } });
+        console.log(`✅ Deleted subtasks for ${taskIds.length} tasks`);
+      }
+
+      // Xóa tasks
+      await Task.deleteMany({ isTrashed: true });
+      console.log(`✅ Deleted ${taskIds.length} tasks from trash`);
+    } else if (actionType === "restore") {
+      const resp = await Task.findById(id);
+      resp.isTrashed = false;
+      resp.save();
+      if (io) io.to(`task-${id}`).emit("task-updated", { taskId: id });
+    } else if (actionType === "restoreAll") {
+      await Task.updateMany(
+        { isTrashed: true },
+        { $set: { isTrashed: false } }
+      );
+      // Không emit từng task, có thể emit global nếu muốn
+    }
+
+    res.status(200).json({
+      status: true,
+      message: `Operation performed successfully.`,
+    });
+  } catch (error) {
+    console.error("Error in deleteRestoreTask:", error);
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+const dashboardStatistics = asyncHandler(async (req, res) => {
+  try {
+    const { userId, isAdmin, isProjectManager } = req.user;
+    const currentUser = await User.findById(userId);
+
+    // Fetch all tasks from the database
+    const allTasks = isAdmin
+      ? await Task.find({
+          isTrashed: false,
+        })
+          .populate({
+            path: "team",
+            select: "name role title email",
+          })
+          .sort({ _id: -1 })
+      : await Task.find({
+          isTrashed: false,
+          team: { $all: [userId] },
+        })
+          .populate({
+            path: "team",
+            select: "name role title email",
+          })
+          .sort({ _id: -1 });
+
+    let users = [];
+    if (isAdmin) {
+      users = await User.find({ isActive: true })
+        .select("name title role isActive createdAt")
+        .limit(10)
+        .sort({ _id: -1 });
+    } else if (isProjectManager) {
+      users = await User.find({ _id: { $in: currentUser.team }, isActive: true })
+        .select("name title role isActive createdAt")
+        .limit(10)
+        .sort({ _id: -1 });
+    }
+
+    // Group tasks by stage and calculate counts
+    const groupedTasks = allTasks?.reduce((result, task) => {
+      const stage = task.stage;
+
+      if (!result[stage]) {
+        result[stage] = 1;
+      } else {
+        result[stage] += 1;
+      }
+
+      return result;
+    }, {});
+
+    const graphData = Object.entries(
+      allTasks?.reduce((result, task) => {
+        const { priority } = task;
+        result[priority] = (result[priority] || 0) + 1;
+        return result;
+      }, {})
+    ).map(([name, total]) => ({ name, total }));
+
+    // Calculate total tasks
+    const totalTasks = allTasks.length;
+    const last10Task = allTasks?.slice(0, 10);
+
+    // Combine results into a summary object
+    const summary = {
+      totalTasks,
+      last10Task,
+      users, // Trả về users cho admin và PM
+      tasks: groupedTasks,
+      graphData,
+    };
+
+    res
+      .status(200)
+      .json({ status: true, ...summary, message: "Successfully." });
+  } catch (error) {
+    console.log(error);
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Lấy tasks theo calendar view
+const getTasksForCalendar = asyncHandler(async (req, res) => {
+  try {
+    const { userId, isAdmin } = req.user;
+    const { startDate, endDate } = req.query;
+
+    let query = { isTrashed: false };
+
+    if (!isAdmin) {
+      query.team = { $all: [userId] };
+    }
+
+    if (startDate && endDate) {
+      query.dueDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+
+    const tasks = await Task.find(query)
+      .populate({
+        path: "team",
+        select: "name title email",
+      })
+      .populate({
+        path: "dependencies",
+        select: "title stage",
+      })
+      .sort({ dueDate: 1 });
+
+    res.status(200).json({
+      status: true,
+      tasks,
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Performance reports
 const getPerformanceReport = asyncHandler(async (req, res) => {
   try {
     const { userId, isAdmin, isProjectManager } = req.user;
@@ -562,11 +1036,44 @@ const getPerformanceReport = asyncHandler(async (req, res) => {
   }
 });
 
+const getTaskTeam = asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.user;
+    const task = await Task.findById(id).populate('team', 'name email _id').populate('projectManager', 'name email _id');
+    if (!task) {
+      return res.status(404).json({ status: false, message: 'Task not found.' });
+    }
+    // Kiểm tra quyền truy cập
+    const isMember = task.team.some(member => member._id.toString() === userId.toString()) || task.projectManager._id.toString() === userId.toString();
+    if (!isMember) {
+      return res.status(403).json({ status: false, message: 'Not authorized.' });
+    }
+    // Gộp team và projectManager, loại trùng lặp
+    const users = [
+      ...task.team.map(u => ({ _id: u._id, name: u.name, email: u.email })),
+      { _id: task.projectManager._id, name: task.projectManager.name, email: task.projectManager.email }
+    ];
+    // Loại trùng lặp theo _id
+    const uniqueUsers = users.filter((u, idx, arr) => arr.findIndex(x => x._id.toString() === u._id.toString()) === idx);
+    res.status(200).json({ status: true, users: uniqueUsers });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+
 export {
   createTask,
+  dashboardStatistics,
+  deleteRestoreTask,
+  duplicateTask,
   getTask,
   getTasks,
   updateTask,
+  updateTaskStage,
   trashTask,
-  getPerformanceReport
+  getTasksForCalendar,
+  getPerformanceReport,
+  getTaskTeam,
 };

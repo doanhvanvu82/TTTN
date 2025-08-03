@@ -1,6 +1,8 @@
 import asyncHandler from "express-async-handler";
+import Notice from "../models/notisModel.js";
 import User from "../models/userModel.js";
 import createJWT from "../utils/index.js";
+import Notification from "../models/notisModel.js";
 
 // POST request - login user
 const loginUser = asyncHandler(async (req, res) => {
@@ -117,109 +119,6 @@ const logoutUser = (req, res) => {
 //   }
 // });
 
-// PUT - Update user profile
-const updateUserProfile = asyncHandler(async (req, res) => {
-  const { userId, isAdmin } = req.user;
-  const { _id } = req.body;
-
-  const id =
-    isAdmin && userId === _id
-      ? userId
-      : isAdmin && userId !== _id
-      ? _id
-      : userId;
-
-  const user = await User.findById(id);
-
-  if (user) {
-    user.name = req.body.name || user.name;
-    user.email = req.body.email || user.email;
-    user.title = req.body.title || user.title;
-    user.company = req.body.company || user.company;
-
-    // Cập nhật role và quyền
-    if (req.body.role === "project_manager") {
-      user.isProjectManager = true;
-      user.isAdmin = false;
-      user.role = "project_manager";
-    } else if (req.body.role === "admin") {
-      user.isAdmin = true;
-      user.isProjectManager = false;
-      user.role = "admin";
-    } else {
-      user.isAdmin = false;
-      user.isProjectManager = false;
-      user.role = "member";
-    }
-
-    const updatedUser = await user.save();
-
-    user.password = undefined;
-
-    res.status(201).json({
-      status: true,
-      message: "Profile Updated Successfully.",
-      user: updatedUser,
-    });
-  } else {
-    res.status(404).json({ status: false, message: "User not found" });
-  }
-});
-
-// POST - Create admin user (admin only)
-const createAdminUser = asyncHandler(async (req, res) => {
-  const { name, email, password, role, title } = req.body;
-  const { isAdmin } = req.user;
-
-  // Only existing admins can create new admin users
-  if (!isAdmin) {
-    return res
-      .status(403)
-      .json({ status: false, message: "Only admins can create admin users" });
-  }
-
-  const userExists = await User.findOne({ email });
-
-  if (userExists) {
-    return res
-      .status(400)
-      .json({ status: false, message: "Email address already exists" });
-  }
-
-  const user = await User.create({
-    name,
-    email,
-    password,
-    role: role || "admin",
-    title: title || "Administrator",
-    isAdmin: true,
-    isActive: true,
-  });
-
-  if (user) {
-    user.password = undefined;
-
-    res.status(201).json({
-      status: true,
-      message: "Admin user created successfully!",
-      user
-    });
-  } else {
-    return res
-      .status(400)
-      .json({ status: false, message: "Invalid user data" });
-  }
-});
-
-// DELETE - delete user account
-const deleteUserProfile = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  await User.findByIdAndDelete(id);
-
-  res.status(200).json({ status: true, message: "User deleted successfully" });
-});
-
 const getTeamList = asyncHandler(async (req, res) => {
   const { search } = req.query;
   const { userId } = req.user;
@@ -282,6 +181,390 @@ const getPMTeamList = asyncHandler(async (req, res) => {
   res.status(200).json(users);
 });
 
+// @GET  - get user notifications
+const getNotificationsList = asyncHandler(async (req, res) => {
+  const { userId } = req.user;
+
+  const notice = await Notice.find({
+    team: userId,
+    isRead: { $nin: [userId] },
+  })
+    .populate("task", "title")
+    .sort({ _id: -1 });
+
+  res.status(200).json(notice);
+});
+
+// @GET  - get user task status
+const getUserTaskStatus = asyncHandler(async (req, res) => {
+  const { userId } = req.user;
+  const currentUser = await User.findById(userId);
+  let users = [];
+  if (currentUser.isAdmin) {
+    users = await User.find().populate("tasks", "title stage").sort({ _id: -1 });
+  } else if (currentUser.isProjectManager) {
+    users = await User.find({ _id: { $in: currentUser.team } }).populate("tasks", "title stage").sort({ _id: -1 });
+  } else {
+    users = [await User.findById(userId).populate("tasks", "title stage")];
+  }
+  res.status(200).json(users);
+});
+
+// @GET  - get user notifications
+const markNotificationRead = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { isReadType, id } = req.query;
+
+    if (isReadType === "all") {
+      await Notice.updateMany(
+        { team: userId, isRead: { $nin: [userId] } },
+        { $push: { isRead: userId } },
+        { new: true }
+      );
+    } else {
+      await Notice.findOneAndUpdate(
+        { _id: id, isRead: { $nin: [userId] } },
+        { $push: { isRead: userId } },
+        { new: true }
+      );
+    }
+    res.status(201).json({ status: true, message: "Done" });
+  } catch (error) {
+    console.log(error);
+  }
+});
+
+// PUT - Update user profile
+const updateUserProfile = asyncHandler(async (req, res) => {
+  const { userId, isAdmin } = req.user;
+  const { _id } = req.body;
+
+  const id =
+    isAdmin && userId === _id
+      ? userId
+      : isAdmin && userId !== _id
+      ? _id
+      : userId;
+
+  const user = await User.findById(id);
+
+  if (user) {
+    user.name = req.body.name || user.name;
+    user.email = req.body.email || user.email;
+    user.title = req.body.title || user.title;
+    user.company = req.body.company || user.company;
+
+    // Cập nhật role và quyền
+    if (req.body.role === "project_manager") {
+      user.isProjectManager = true;
+      user.isAdmin = false;
+      user.role = "project_manager";
+    } else if (req.body.role === "admin") {
+      user.isAdmin = true;
+      user.isProjectManager = false;
+      user.role = "admin";
+    } else {
+      user.isAdmin = false;
+      user.isProjectManager = false;
+      user.role = "member";
+    }
+
+    const updatedUser = await user.save();
+
+    user.password = undefined;
+
+    res.status(201).json({
+      status: true,
+      message: "Profile Updated Successfully.",
+      user: updatedUser,
+    });
+  } else {
+    res.status(404).json({ status: false, message: "User not found" });
+  }
+});
+
+// PUT - active/disactivate user profile
+const activateUserProfile = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const user = await User.findById(id);
+
+  if (user) {
+    user.isActive = req.body.isActive;
+
+    await user.save();
+
+    user.password = undefined;
+
+    res.status(201).json({
+      status: true,
+      message: `User account has been ${
+        user?.isActive ? "activated" : "disabled"
+      }`,
+    });
+  } else {
+    res.status(404).json({ status: false, message: "User not found" });
+  }
+});
+
+// POST - Create admin user (admin only)
+const createAdminUser = asyncHandler(async (req, res) => {
+  const { name, email, password, role, title } = req.body;
+  const { isAdmin } = req.user;
+
+  // Only existing admins can create new admin users
+  if (!isAdmin) {
+    return res
+      .status(403)
+      .json({ status: false, message: "Only admins can create admin users" });
+  }
+
+  const userExists = await User.findOne({ email });
+
+  if (userExists) {
+    return res
+      .status(400)
+      .json({ status: false, message: "Email address already exists" });
+  }
+
+  const user = await User.create({
+    name,
+    email,
+    password,
+    role: role || "admin",
+    title: title || "Administrator",
+    isAdmin: true,
+    isActive: true,
+  });
+
+  if (user) {
+    user.password = undefined;
+
+    res.status(201).json({
+      status: true,
+      message: "Admin user created successfully!",
+      user
+    });
+  } else {
+    return res
+      .status(400)
+      .json({ status: false, message: "Invalid user data" });
+  }
+});
+
+const changeUserPassword = asyncHandler(async (req, res) => {
+  const { userId } = req.user;
+
+  // Remove this condition
+  if (userId === "65ff94c7bb2de638d0c73f63") {
+    return res.status(404).json({
+      status: false,
+      message: "This is a test user. You can not chnage password. Thank you!!!",
+    });
+  }
+
+  const user = await User.findById(userId);
+
+  if (user) {
+    user.password = req.body.password;
+
+    await user.save();
+
+    user.password = undefined;
+
+    res.status(201).json({
+      status: true,
+      message: `Password chnaged successfully.`,
+    });
+  } else {
+    res.status(404).json({ status: false, message: "User not found" });
+  }
+});
+
+// DELETE - delete user account
+const deleteUserProfile = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  await User.findByIdAndDelete(id);
+
+  res.status(200).json({ status: true, message: "User deleted successfully" });
+});
+
+// Lấy notifications của user
+const getNotifications = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { page = 1, limit = 20, unreadOnly = false } = req.query;
+
+    let query = { recipient: userId };
+    
+    if (unreadOnly === "true") {
+      query.isRead = false;
+    }
+
+    const notifications = await Notification.find(query)
+      .populate({
+        path: "sender",
+        select: "name email",
+      })
+      .populate({
+        path: "task",
+        select: "title stage",
+      })
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Notification.countDocuments(query);
+
+    res.status(200).json({
+      status: true,
+      notifications,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      total,
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Đánh dấu notification đã đọc
+const markNotificationAsRead = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { notificationId } = req.params;
+
+    const notification = await Notification.findOne({
+      _id: notificationId,
+      recipient: userId,
+    });
+
+    if (!notification) {
+      return res.status(404).json({ status: false, message: "Notification not found." });
+    }
+
+    notification.isRead = true;
+    await notification.save();
+
+    // Emit realtime event kèm unreadCount
+    const io = req.app.get("io");
+    if (io) {
+      const count = await Notification.countDocuments({ recipient: userId, isRead: false });
+      io.to(`user-${userId}`).emit("notification-read", { userId, notificationId, unreadCount: count });
+    }
+
+    res.status(200).json({
+      status: true,
+      message: "Notification marked as read.",
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Đánh dấu tất cả notifications đã đọc
+const markAllNotificationsAsRead = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+
+    await Notification.updateMany(
+      { recipient: userId, isRead: false },
+      { isRead: true }
+    );
+
+    // Emit realtime event kèm unreadCount
+    const io = req.app.get("io");
+    if (io) {
+      const count = await Notification.countDocuments({ recipient: userId, isRead: false });
+      io.to(`user-${userId}`).emit("notification-read", { userId, all: true, unreadCount: count });
+    }
+
+    res.status(200).json({
+      status: true,
+      message: "All notifications marked as read.",
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Xóa notification
+const deleteNotification = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { notificationId } = req.params;
+
+    const notification = await Notification.findOneAndDelete({
+      _id: notificationId,
+      recipient: userId,
+    });
+
+    if (!notification) {
+      return res.status(404).json({ status: false, message: "Notification not found." });
+    }
+
+    // Emit realtime event kèm unreadCount
+    const io = req.app.get("io");
+    if (io) {
+      const count = await Notification.countDocuments({ recipient: userId, isRead: false });
+      io.to(`user-${userId}`).emit("notification-deleted", { userId, notificationId, unreadCount: count });
+    }
+
+    res.status(200).json({
+      status: true,
+      message: "Notification deleted successfully.",
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Xóa tất cả notifications của user
+const deleteAllNotifications = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+
+    const result = await Notification.deleteMany({
+      recipient: userId,
+    });
+
+    // Emit realtime event kèm unreadCount
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user-${userId}`).emit("notification-deleted", { userId, all: true, unreadCount: 0 });
+    }
+
+    res.status(200).json({
+      status: true,
+      message: `${result.deletedCount} notifications deleted successfully.`,
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// Lấy số lượng notifications chưa đọc
+const getUnreadNotificationCount = asyncHandler(async (req, res) => {
+  try {
+    const { userId } = req.user;
+
+    const count = await Notification.countDocuments({
+      recipient: userId,
+      isRead: false,
+    });
+
+    res.status(200).json({
+      status: true,
+      count,
+    });
+  } catch (error) {
+    return res.status(400).json({ status: false, message: error.message });
+  }
+});
+
+// POST - Add new user by admin (no auto-login, no set cookie)
 const addUserByAdmin = asyncHandler(async (req, res) => {
   const { name, email, password, role, title, company } = req.body;
 
@@ -415,47 +698,28 @@ const searchUsers = asyncHandler(async (req, res) => {
   res.status(200).json(users);
 });
 
-const changeUserPassword = asyncHandler(async (req, res) => {
-  const { userId } = req.user;
-
-  // Remove this condition
-  if (userId === "65ff94c7bb2de638d0c73f63") {
-    return res.status(404).json({
-      status: false,
-      message: "This is a test user. You can not chnage password. Thank you!!!",
-    });
-  }
-
-  const user = await User.findById(userId);
-
-  if (user) {
-    user.password = req.body.password;
-
-    await user.save();
-
-    user.password = undefined;
-
-    res.status(201).json({
-      status: true,
-      message: `Password chnaged successfully.`,
-    });
-  } else {
-    res.status(404).json({ status: false, message: "User not found" });
-  }
-});
-
 export {
+  activateUserProfile,
+  changeUserPassword,
   createAdminUser,
   deleteUserProfile,
+  getNotificationsList,
+  getTeamList,
+  getUserTaskStatus,
   loginUser,
   logoutUser,
+  markNotificationRead,
   registerUser,
   updateUserProfile,
-  getTeamList,
+  getNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  deleteNotification,
+  deleteAllNotifications,
+  getUnreadNotificationCount,
   addUserByAdmin,
   addUserToTeam,
   removeUserFromTeam,
   getPMTeamList,
   searchUsers,
-  changeUserPassword,
 };
